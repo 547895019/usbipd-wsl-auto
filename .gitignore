@@ -1,0 +1,21 @@
+# Generated locally by install.ps1. Never publish machine-specific settings.
+config.json
+config.json.tmp
+PAUSE
+*.log
+watch-state.json
+
+# Local diagnostics and packaging output
+inspect-state.ps1
+state.json
+state-summary.txt
+wsl-distros.txt
+dist/
+*.zip
+
+# Editors and operating systems
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
