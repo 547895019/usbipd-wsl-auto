@@ -118,6 +118,7 @@ sudo usermod -aG dialout $USER
 | `0403:6011` | FTDI FT4232 |
 | `0403:6014` | FTDI FT232H |
 | `0403:6015` | FTDI FT231X |
+| `2207:0006` | Rockchip ADB(安卓调试桥接口) |
 
 查看设备的 VID:PID：
 
@@ -126,7 +127,7 @@ usbipd list
 usbipd state
 ```
 
-**整只 USB 设备会被转发。** 挂进 WSL 后，它的 Windows COM 口、JTAG、U 盘等都会离开 Windows。因此 ESP32 的 `303a:1001`、`303a:1002` 和 ATLink 等复合设备没有默认加入。确有需要时再加入 `allowlist.ps1`，然后重新运行安装器。
+**整只 USB 设备会被转发。** 挂进 WSL 后，它在 Windows 上的 COM 口、JTAG、U 盘等都会离开 Windows。Rockchip ADB (`2207:0006`) 挂进 WSL 期间，Windows 侧的 adb 看不到这块板。ESP32 的 `303a:1001`、`303a:1002`、ATLink 等复合设备和 Rockchip 刷机模式 `2207:350a`(Rockusb) 没有默认加入，以保证 Windows 的烧录工具可用。确有需要时再加入 `allowlist.ps1`，然后重新运行安装器。
 
 ## 日志、暂停和手动操作
 

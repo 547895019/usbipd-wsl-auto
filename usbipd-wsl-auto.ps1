@@ -1,7 +1,9 @@
 ﻿# Poll usbipd and attach allowlisted USB serial adapters into WSL.
 # usbipd --auto-attach follows one device only. Adapters that share one VID:PID
 # cannot all be claimed that way, so this script attaches every plugged match.
-# Disconnected devices are retried after a grace period, including after WSL restarts.
+# Disconnects are retried after a grace period, including after WSL restarts.
+# Stale Attached states (WSL restarted while the connection died half-open) are
+# repaired by detaching devices whose USB serial is missing from the WSL kernel.
 # Use the PAUSE file or uninstall.ps1 to stop automatic attachment.
 # Distro comes from config.json written by install.ps1. Empty means the default WSL distro.
 #Requires -Version 5.1
@@ -24,12 +26,14 @@ if (Test-Path -LiteralPath $ConfigPath) {
 $IntervalSec = 2
 $FailBackoffSec = 20
 $AttachGraceSec = 8
+$GhostPollCycles = 5
 $SkipDescription = '(?i)大容量存储|Mass Storage|蓝牙|Bluetooth|Hub|键盘|鼠标|Keyboard|Mouse|Camera|摄像头'
 
 $Usbipd = Join-Path $env:ProgramFiles 'usbipd-win\usbipd.exe'
 if (-not (Test-Path -LiteralPath $Usbipd)) {
     throw "usbipd.exe not found: $Usbipd"
 }
+$Wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
 
 $LogDir = Join-Path $env:LOCALAPPDATA 'usbipd-wsl-auto'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -65,12 +69,47 @@ function Invoke-Usbipd {
     [void]$proc.Start()
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
-    $proc.WaitForExit()
+    if (-not $proc.WaitForExit(30000)) {
+        try { $proc.Kill() } catch {}
+        return @{ Code = 124; Out = ''; Err = 'usbipd timed out' }
+    }
     return @{
         Code = $proc.ExitCode
         Out  = $outTask.Result.Trim()
         Err  = $errTask.Result.Trim()
     }
+}
+
+function Invoke-Wsl {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Argv)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Wsl
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $psi.StandardOutputEncoding = $utf8
+    $psi.StandardErrorEncoding = $utf8
+    $quoted = foreach ($a in $Argv) {
+        if ($a -match '[\s"]') { '"{0}"' -f ($a -replace '"', '\"') } else { $a }
+    }
+    $psi.Arguments = $quoted -join ' '
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    try {
+        [void]$proc.Start()
+    } catch {
+        return $null
+    }
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    if (-not $proc.WaitForExit(15000)) {
+        try { $proc.Kill() } catch {}
+        return $null
+    }
+    if ($proc.ExitCode -ne 0) { return $null }
+    return $outTask.Result
 }
 
 function Get-VidPid($Device) {
@@ -79,6 +118,12 @@ function Get-VidPid($Device) {
         return ('{0}:{1}' -f $Matches[1], $Matches[2]).ToLowerInvariant()
     }
     return $null
+}
+
+function Get-Serial($InstanceId) {
+    $parts = ([string]$InstanceId).Split('\')
+    if ($parts.Count -ge 3) { return $parts[$parts.Count - 1] }
+    return ''
 }
 
 $mutex = New-Object System.Threading.Mutex($false, 'Local\usbipd-wsl-auto')
@@ -125,11 +170,14 @@ try {
     $live = @{}
     $grace = @{}
     $failUntil = @{}
+    $wslSkippedLogged = $false
     $pausedLogged = $false
+    $cycle = 0
 
     Write-Log ("watcher start distro={0} allow={1}" -f $Distro, ($Allow -join ','))
 
     while ($true) {
+        $cycle++
         try {
             if (Test-Path -LiteralPath $PauseFile) {
                 if (-not $pausedLogged) {
@@ -177,18 +225,13 @@ try {
                         continue
                     }
 
-                    if ($held.ContainsKey($id)) {
-                        if ($held[$id] -eq $bus) { continue }
-                        $held.Remove($id)
-                        $dirty = $true
-                        Write-Log ("bus changed, clear pause {0} {1}" -f $bus, $vidpid)
-                    }
+                    if ($held.ContainsKey($id) -and $held[$id] -eq $bus) { continue }
 
                     if ($grace.ContainsKey($id) -and $grace[$id] -gt $now) { continue }
 
                     if ($live.ContainsKey($id)) {
                         # A missed client IP can also mean a WSL/network reconnect.
-                        # Retry during this grace window rather than treating every
+                        # Retry after this grace window rather than treating every
                         # transient disappearance as an intentional manual detach.
                         $grace[$id] = $now.AddSeconds($AttachGraceSec)
                         $live.Remove($id)
@@ -210,6 +253,9 @@ try {
                         continue
                     }
 
+                    # The whole device must be shared before it can be attached.
+                    # AutoBind policy from install.ps1 usually keeps new devices
+                    # shared automatically; these calls are the fallback path.
                     $needsBind = $attachText -match '(?i)not shared|not bound'
                     $errorState = $attachText -match '(?i)error state'
                     if (-not $needsBind -and -not $errorState) {
@@ -252,6 +298,60 @@ try {
                 }
 
                 if ($dirty) { Save-WatchState }
+
+                # WSL restarts can leave usbipd reporting Attached while the
+                # network session died half-open, so the device never reappears
+                # in the WSL kernel. Every GhostPollCycles cycles, compare the
+                # USB serial of each client-attached allowlisted device with
+                # sysfs in WSL and detach the missing ones; the attach path
+                # above brings them back. Devices without a unique serial
+                # cannot be verified and are left alone.
+                if (($cycle % $GhostPollCycles) -eq 1) {
+                    $suspects = @()
+                    foreach ($dev in $devices) {
+                        $bus = [string]$dev.BusId
+                        $id = [string]$dev.InstanceId
+                        $vidpid = Get-VidPid $dev
+                        if (-not $bus -or -not $id -or -not $vidpid -or ($Allow -notcontains $vidpid)) { continue }
+                        if (-not [string]$dev.ClientIPAddress) { continue }
+                        if ($grace.ContainsKey($id) -and $grace[$id] -gt $now) { continue }
+                        $serial = Get-Serial $id
+                        if ($serial -and ($serial -notmatch '[&]')) {
+                            $suspects += [pscustomobject]@{ Bus = $bus; Serial = $serial; Id = $id }
+                        }
+                    }
+                    if ($suspects.Count -gt 0) {
+                        $wslArgs = @()
+                        if ($Distro) { $wslArgs = @('-d', $Distro) }
+                        # No spaces in this probe: wsl.exe splits the -c value
+                        # when a command line contains spaces, breaking sh.
+                        # grep prints `path:content` lines; vhci hub entries
+                        # (serial=vhci_hcd.0) are ignored by the match below.
+                        $serials = Invoke-Wsl @wslArgs '--' 'grep' '-h' '.' '--' '/sys/bus/usb/devices/*/serial'
+                        if ($null -ne $serials) {
+                            $wslSerials = @{}
+                            foreach ($line in ($serials -split "`r?`n")) {
+                                if ($line -match '^[0-9A-Za-z_.-]+$') {
+                                    $wslSerials[$Matches[0].Trim()] = $true
+                                }
+                            }
+                            foreach ($obj in $suspects) {
+                                if ($wslSerials.ContainsKey($obj.Serial)) { continue }
+                                Write-Log ("ghost {0}: serial {1} missing in WSL, detaching" -f $obj.Bus, $obj.Serial)
+                                $detached = Invoke-Usbipd detach '--busid' $obj.Bus
+                                if ($detached.Code -eq 0) {
+                                    $live.Remove($obj.Id)
+                                } else {
+                                    $failUntil[$obj.Id] = $now.AddSeconds($FailBackoffSec)
+                                    Write-Log ("ghost detach failed {0}: {1}" -f $obj.Bus, $detached.Err)
+                                }
+                            }
+                        } elseif (-not $wslSkippedLogged) {
+                            Write-Log 'WSL did not answer the serial check, skipping ghost recovery'
+                            $wslSkippedLogged = $true
+                        }
+                    }
+                }
             }
         } catch {
             Write-Log ("loop error: {0}" -f $_.Exception.Message)

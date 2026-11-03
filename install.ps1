@@ -3,7 +3,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Distro Ubuntu-24.04
 #Requires -Version 5.1
 param(
-    [string]$Distro
+    [string]$Distro,
+    [int]$RepeatMinutes = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -130,16 +131,23 @@ Write-Host "Wrote $ConfigPath with $($policyGuids.Count) recorded policy rule(s)
 $taskName = 'usbipd-wsl-auto'
 $arg = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Watcher
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg -WorkingDirectory $Root
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# A killed watcher (console close, session changes, crashes) is only restarted
+# at the next logon by the AtLogOn trigger. The repeating trigger is the
+# keepalive: it re-runs the task every $RepeatMinutes, and a running mutex-owner
+# makes each extra run exit immediately.
+$repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(15)) `
+    -RepetitionInterval (New-TimeSpan -Minutes $RepeatMinutes)
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew `
+    -StartWhenAvailable `
     -RestartCount 10 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $taskPrincipal -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger, $repeatTrigger) -Settings $settings -Principal $taskPrincipal -Force | Out-Null
 $task = Get-ScheduledTask -TaskName $taskName
 if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName }
 # Stop-ScheduledTask does not reliably stop the PowerShell child it launched.

@@ -34,7 +34,7 @@ Get-ScheduledTask usbipd-wsl-auto
 Get-Content $env:LOCALAPPDATA\usbipd-wsl-auto\attach.log -Tail 20
 ```
 
-Allowlisted devices should show `Attached`. In WSL, run:
+Allowlisted devices should show `Attached`. In WSL, run `adb devices` for Rockchip boards connected in ADB mode (the `2207:0006` default entry) and:
 
 ```bash
 lsusb
@@ -55,7 +55,7 @@ The uninstaller removes the scheduled task, watcher, policies recorded by the in
 
 ## Important
 
-USB/IP forwards the **entire USB device**, not only its COM port. Its Windows COM port, JTAG interface, mass storage, and other functions become unavailable in Windows while attached. Review the allowlist before installation. Composite ESP32 and ATLink devices are not included by default.
+USB/IP forwards the **entire USB device**, not only its COM port. Its Windows COM port, JTAG interface, mass storage, and other functions become unavailable in Windows while attached — for example, Windows-side `adb` no longer sees a Rockchip board once `2207:0006` is attached. Review the allowlist before installation. Composite ESP32 and ATLink devices, and Rockchip maskrom `2207:350a` (Rockusb, needed by host-side flashing tools), are not included by default.
 
 ## License
 

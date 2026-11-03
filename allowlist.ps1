@@ -1,6 +1,8 @@
 # VID:PID values to share and attach into WSL.
 # Whole-device attach: a match here leaves Windows (COM port, JTAG, mass storage).
 # ESP32 USB-Serial-JTAG 303a:1001 and USB-serial+MSC 303a:1002 are omitted on purpose.
+# Rockchip maskrom/rockusb (2207:350a) is also omitted; bootloader mode stays in
+# Windows so flashing tools and drivers keep working on the host side.
 $Allow = @(
     '1a86:55d3'   # WCH CH343
     '1a86:55d4'   # WCH CH9102
@@ -12,4 +14,5 @@ $Allow = @(
     '0403:6011'   # FTDI FT4232
     '0403:6014'   # FTDI FT232H
     '0403:6015'   # FTDI FT231X
+    '2207:0006'   # Rockchip ADB (Android Debug Bridge interface)
 )
