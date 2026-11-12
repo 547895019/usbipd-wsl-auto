@@ -331,8 +331,13 @@ try {
                         if ($null -ne $serials) {
                             $wslSerials = @{}
                             foreach ($line in ($serials -split "`r?`n")) {
-                                if ($line -match '^[0-9A-Za-z_.-]+$') {
-                                    $wslSerials[$Matches[0].Trim()] = $true
+                                # Serial characters only: CH343 gives digits,
+                                # ESP32 USB-Serial-JTAG gives MAC-style values
+                                # like 3C:0F:02:6D:ED:98. Anything else (hub
+                                # serials such as vhci_hcd.0, empty lines) is
+                                # skipped so it cannot shadow a device match.
+                                if ($line -match '^[0-9A-Fa-f:.-]+$' -and $line -match '[0-9A-Fa-f]') {
+                                    $wslSerials[$line.Trim()] = $true
                                 }
                             }
                             foreach ($obj in $suspects) {
